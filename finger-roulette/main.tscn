@@ -1,0 +1,41 @@
+[gd_scene format=3 uid="uid://blv2714ymtar7"]
+
+[ext_resource type="Script" uid="uid://bip0xfm65j1rk" path="res://main.gd" id="1_ig7tw"]
+
+[sub_resource type="Gradient" id="Gradient_ig7tw"]
+colors = PackedColorArray(1, 1, 1, 1, 1, 0.9019608, 0, 1)
+
+[node name="Main" type="Node2D" unique_id=1316009650]
+script = ExtResource("1_ig7tw")
+
+[node name="Background" type="ColorRect" parent="." unique_id=1244238895]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.050980393, 0.06666667, 0.09019608, 1)
+
+[node name="CountdownTimer" type="Timer" parent="." unique_id=569130660]
+wait_time = 2.8
+one_shot = true
+
+[node name="WinParticles" type="CPUParticles2D" parent="." unique_id=456481604]
+emitting = false
+amount = 60
+lifetime = 0.8
+one_shot = true
+explosiveness = 1.0
+spread = 180.0
+initial_velocity_min = 300.0
+initial_velocity_max = 700.0
+scale_amount_min = 12.0
+scale_amount_max = 24.0
+color_ramp = SubResource("Gradient_ig7tw")
+
+[node name="GuideLabel" type="Label" parent="." unique_id=1142162092]
+offset_right = 40.0
+offset_bottom = 23.0
+theme_override_font_sizes/font_size = 56
+horizontal_alignment = 1
+vertical_alignment = 1
