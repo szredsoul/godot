@@ -270,7 +270,7 @@ func _update_trees() -> void:
 		t.setup(next_tree_x, rng)
 		add_child(t)
 		trees.append(t)
-		next_tree_x += rng.randf_range(300.0, 660.0)
+		next_tree_x += rng.randf_range(600.0, 1100.0)
 	for t in trees:
 		if absf(t.position.x - camera.position.x) > 1500.0:
 			continue
