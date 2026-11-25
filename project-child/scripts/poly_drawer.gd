@@ -8,7 +8,7 @@ var polys: Array[PackedVector2Array] = []
 
 func _draw() -> void:
 	for p in polys:
-		if p.size() >= 3:
+		if W.can_fill(p):
 			draw_colored_polygon(p, color)
 			var closed := PackedVector2Array(p)
 			closed.append(p[0])

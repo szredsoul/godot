@@ -9,6 +9,9 @@ var streams := {}
 var players: Array[AudioStreamPlayer] = []
 var next_player := 0
 var rng := RandomNumberGenerator.new()
+var loop_player: AudioStreamPlayer
+
+static var _cache := {} # 한 번 합성한 소리는 씬이 바뀌어도 재사용
 
 
 func _ready() -> void:
@@ -17,7 +20,21 @@ func _ready() -> void:
 		var p := AudioStreamPlayer.new()
 		add_child(p)
 		players.append(p)
-	_build_all()
+	loop_player = AudioStreamPlayer.new()
+	add_child(loop_player)
+	if _cache.is_empty():
+		_build_all()
+		_cache = streams
+	streams = _cache
+
+
+## 배경 반복음 (여름 매미 등)
+func play_loop(sound: String, vol_db: float) -> void:
+	if not streams.has(sound):
+		return
+	loop_player.stream = streams[sound]
+	loop_player.volume_db = vol_db
+	loop_player.play()
 
 
 func play(sound: String, pitch: float = 1.0, vol_db: float = 0.0) -> void:
@@ -73,6 +90,75 @@ func _build_all() -> void:
 	var b2 := _tone(0.12, 4200.0, 2800.0, 0, 0.005, 1.2)
 	b2 = _mix(b2, _tone(0.16, 4000.0, 2600.0, 0, 0.005, 1.2), 0.16, 1.0)
 	streams["bird2"] = _wav(_norm(b2, 0.28))
+
+	# 그림자 밟음 (하트 감소): '아야' 내려가는 두 음
+	var hit := _mix(_tone(0.12, 660.0, 600.0, 1, 0.004, 0.8), _tone(0.25, 440.0, 330.0, 1, 0.004, 1.0), 0.1, 1.0)
+	streams["hit"] = _wav(_norm(_mix(hit, _noise(0.08, 2000.0, 3.0), 0.0, 0.3), 0.55))
+	# 동전: '띠링'
+	streams["coin"] = _wav(_norm(_mix(_bell(1976.0, 0.12, 18.0), _bell(2637.0, 0.35, 10.0), 0.06, 1.0), 0.4))
+	# 구슬: 유리 '딸깍' + 맑은 음
+	var marble := _mix(_noise(0.03, 6000.0, 4.0), _bell(2349.0, 0.5, 7.0), 0.01, 0.8)
+	marble = _mix(marble, _bell(3136.0, 0.4, 9.0), 0.08, 0.5)
+	streams["marble"] = _wav(_norm(marble, 0.5))
+	# 강아지: '멍멍'
+	var bark := PackedFloat32Array()
+	for k in 2:
+		var woof := _mix(_tone(0.12, 520.0, 300.0, 2, 0.004, 1.2), _noise(0.1, 1400.0, 2.0), 0.0, 0.5)
+		bark = _mix(bark, woof, k * 0.2, 1.0)
+	streams["bark"] = _wav(_norm(bark, 0.5))
+	# 행인과 부딪힘: '퉁'
+	streams["bump"] = _wav(_norm(_mix(_tone(0.15, 200.0, 110.0, 0, 0.002, 2.0), _noise(0.06, 1200.0, 3.0), 0.0, 0.6), 0.5))
+	# 보행 신호 초록불: '띠띠띠' (높은 삐삐음)
+	var sig := PackedFloat32Array()
+	for k in 3:
+		sig = _mix(sig, _tone(0.07, 1760.0, 1760.0, 0, 0.003, 0.6), k * 0.14, 1.0)
+	streams["signal"] = _wav(_norm(sig, 0.3))
+	# 버스 문: '푸쉬'
+	streams["door"] = _wav(_norm(_noise(0.5, 3500.0, 1.2, 0.03), 0.35))
+	# 배달 오토바이: '부웅' (거친 소리가 지나감)
+	var moto := _tone(0.7, 90.0, 140.0, 2, 0.08, 1.0)
+	moto = _mix(moto, _noise(0.7, 900.0, 1.0, 0.1), 0.0, 0.6)
+	streams["moto"] = _wav(_norm(moto, 0.45))
+	# 집 도착: 팡파르
+	var fan := _arp([523.3, 659.3, 784.0, 1046.5], 0.11, 0.3)
+	fan = _mix(fan, _bell(1318.5, 0.9, 4.0), 0.5, 1.0)
+	fan = _mix(fan, _bell(1568.0, 0.9, 4.0), 0.5, 0.7)
+	streams["fanfare"] = _wav(_norm(fan, 0.55))
+	# 6시가 지남: 낮은 '땡땡'
+	streams["late"] = _wav(_norm(_mix(_bell(392.0, 0.5, 5.0), _bell(330.0, 0.8, 4.0), 0.35, 1.0), 0.45))
+	# 메뉴 선택 / 구매
+	streams["select"] = _wav(_norm(_bell(1568.0, 0.12, 25.0), 0.3))
+	streams["buy"] = _wav(_norm(_arp([1046.5, 1568.0, 2093.0], 0.05, 0.3), 0.45))
+	# 여름 매미 (반복)
+	streams["cicada"] = _cicada()
+	# 상상 연출: 풍덩(바다·늪·얼음) / 치익(용암) / 부글(거품)
+	var splash := _mix(_noise(0.45, 1800.0, 1.6, 0.005), _tone(0.2, 300.0, 120.0, 0, 0.003, 1.5), 0.0, 0.7)
+	streams["splash"] = _wav(_norm(splash, 0.55))
+	streams["sizzle"] = _wav(_norm(_noise(0.5, 7000.0, 1.3, 0.01), 0.4))
+	var bub := PackedFloat32Array()
+	for k in 3:
+		bub = _mix(bub, _tone(0.06, 220.0 + k * 90.0, 520.0 + k * 120.0, 0, 0.003, 2.0), k * 0.09, 1.0)
+	streams["bubble"] = _wav(_norm(bub, 0.35))
+
+
+## 매미 소리: 높은 노이즈를 빠르게 떨리게 하고 천천히 커졌다 작아진다 (2초 반복)
+func _cicada() -> AudioStreamWAV:
+	var dur := 2.0
+	var n := int(dur * RATE)
+	var out := PackedFloat32Array()
+	out.resize(n)
+	var a := 1.0 - exp(-TAU * 5000.0 / RATE)
+	var y := 0.0
+	for i in n:
+		var t := float(i) / RATE
+		y += a * (rng.randf_range(-1.0, 1.0) - y)
+		var pulse := 0.5 + 0.5 * sin(TAU * 32.0 * t)
+		var swell := 0.6 + 0.4 * sin(TAU * t / dur)
+		out[i] = y * pulse * swell
+	var s := _wav(_norm(out, 0.35))
+	s.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	s.loop_end = n
+	return s
 
 
 # ───────────── 합성 도구 ─────────────

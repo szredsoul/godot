@@ -19,6 +19,11 @@ static func ellipse(c: Vector2, rx: float, ry: float, n: int = 24) -> PackedVect
 	return pts
 
 
+## 칠할 수 있는 다각형인지 (잘라 낸 그림자가 너무 가늘면 엔진이 삼각형으로 못 나눈다)
+static func can_fill(poly: PackedVector2Array) -> bool:
+	return poly.size() >= 3 and not Geometry2D.triangulate_polygon(poly).is_empty()
+
+
 ## 점과 다각형 사이 거리 (안쪽이면 0)
 static func dist_to_polygon(p: Vector2, poly: PackedVector2Array) -> float:
 	if poly.size() < 3:
