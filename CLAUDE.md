@@ -12,7 +12,8 @@
 | 폴더 | 내용 | 비고 |
 |---|---|---|
 | `finger-roulette/` | 손가락 룰렛 (모바일, 세로 화면) | |
-| `project-child/` | 그림자 밟기 (PC, 탑다운) | 아래 4장 참고 |
+| `project-child/` | 그림자 밟기 (PC, 탑다운) | 아래 4장 참고. 핵심 재미가 약해 **보류** (새 기획으로 넘어감) |
+| `ink-slash/` | 먹 한 획 (PC, 탑다운 액션, 시험판) | 기획·수치는 `ink-slash/DESIGN.md`. 저스트 회피 → 시간 정지 → 붓으로 한 획 베기 |
 | `tutorial/` | 튜토리얼 연습용 | |
 | `lemmings/` | Tumble Troop | **별도 git 저장소**. 이 저장소에 절대 `git add` 하지 않는다. 작업할 땐 그 폴더의 `CLAUDE.md`를 따른다 |
 
