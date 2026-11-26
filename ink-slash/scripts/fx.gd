@@ -6,6 +6,7 @@ extends Node2D
 var drops: Array[Dictionary] = []
 var strokes: Array[Dictionary] = []
 var ghosts: Array[Dictionary] = []
+var seals: Array[Dictionary] = []
 var stains: Stains
 
 
@@ -43,6 +44,15 @@ func slash_arc(center: Vector2, radius: float, a0: float, a1: float, width: floa
 	stroke(Ink.arc_points(center, radius, a0, a1, 14), width, 0.22)
 
 
+## 낙관: 붉은 도장이 크게 찍혔다가 옅어진다
+func seal(pos: Vector2, r: float) -> void:
+	seals.append({"p": pos, "r": r, "life": 0.9, "age": 0.0, "rot": randf_range(-0.2, 0.2)})
+	splash(pos, Vector2.ZERO, 22, 480.0, PI, Ink.SEAL)
+	if stains:
+		stains.marks.append({"poly": Ink.blob(pos, r * 0.35, randf() * TAU, 0.15, 4), "c": Color(Ink.SEAL, 0.35)})
+		stains.queue_redraw()
+
+
 func ghost(pos: Vector2, facing: Vector2) -> void:
 	# 잔상은 띄엄띄엄 (매 프레임 그리면 굵은 관처럼 보인다)
 	if not ghosts.is_empty() and (ghosts[ghosts.size() - 1]["p"] as Vector2).distance_to(pos) < 26.0:
@@ -75,6 +85,12 @@ func step(dt: float) -> void:
 		if g["age"] < g["life"]:
 			kg.append(g)
 	ghosts = kg
+	var kseal: Array[Dictionary] = []
+	for s in seals:
+		s["age"] += dt
+		if s["age"] < s["life"]:
+			kseal.append(s)
+	seals = kseal
 	queue_redraw()
 
 
@@ -97,6 +113,16 @@ func _draw() -> void:
 					draw_polyline(part, Color(Ink.PAPER, 0.55 * a), float(ln["w"]), true)
 	for d in drops:
 		draw_circle(d["p"], d["r"], d["c"], true, -1.0, true)
+	for s in seals:
+		# 쾅 찍히듯 크게 나타났다가 제자리에서 옅어진다
+		var k := float(s["age"]) / float(s["life"])
+		var r: float = float(s["r"]) * (1.25 - 0.25 * minf(k * 6.0, 1.0))
+		var a := 1.0 - k * k
+		draw_set_transform(s["p"], s["rot"], Vector2.ONE)
+		draw_rect(Rect2(-r * 0.5, -r * 0.5, r, r), Color(Ink.SEAL, 0.85 * a))
+		draw_rect(Rect2(-r * 0.38, -r * 0.38, r * 0.76, r * 0.76), Color(Ink.PAPER, 0.9 * a), false, maxf(3.0, r * 0.05))
+		draw_string(Ink.brush_font(), Vector2(-r * 0.32, r * 0.22), "印", HORIZONTAL_ALIGNMENT_CENTER, r * 0.64, int(r * 0.55), Color(Ink.PAPER, 0.9 * a))
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
 ## 바닥에 쌓이는 먹 자국 (추가될 때만 다시 그린다)

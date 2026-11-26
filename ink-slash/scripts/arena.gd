@@ -3,7 +3,7 @@ extends Node2D
 ## 공격이 닿기 직전에 피하면(저스트) 시간이 멈춘다. 멈춘 동안 마우스로 한 획을 그으면
 ## 그 선을 따라 번개처럼 지나가며 선 위의 요괴를 한 번에 벤다.
 
-enum Mode { FIGHT, JUST, STROKE, CUT, OVER }
+enum Mode { FIGHT, JUST, STROKE, CUT, OVER, CHOOSE }
 
 const JUST_WINDOW := 0.22 # 공격이 닿기까지 이 시간(초) 안에 피하면 저스트
 const STROKE_TIME := 1.8 # 멈춘 시간 동안 한 획을 그을 수 있는 시간 (실제 초)
@@ -18,6 +18,29 @@ const RANK_STYLE: Array[float] = [0.0, 25.0, 70.0, 130.0]
 const RANK_NAME: Array[String] = ["", "멋", "신", "절"]
 const RANK_MULT: Array[float] = [1.0, 1.5, 2.0, 3.0]
 const SAVE_PATH := "user://best.cfg"
+const BOSS_EVERY := 5
+const BOSS_CUT_DMG := 7 # 한 획이 보스에게 주는 피해 (보스 체력 60)
+var cut_blocker: Yokai
+var boss_angry_said := false
+const RING_SPEED := 330.0 # 먹 물결이 퍼지는 속도
+const RING_MAX := 900.0
+const RING_THICK := 16.0
+const INTRO := {
+	"charger": "돌진 요괴: 붉은 낙관이 뜨면 곧 돌진! 닿기 직전에 피하면 저스트",
+	"shooter": "먹 탄 요괴: 날아오는 먹 탄도 닿기 직전에 피하면 저스트",
+	"shield": "방패 요괴: 앞은 막아요. 옆이나 뒤로 돌아가 베거나, 한 획을 둘러서 그어요 (셋째 베기로 방패 깨기)",
+	"splitter": "분열 요괴: 그냥 베면 작은 요괴 둘로 갈라져요. 한 획으로 베면 깔끔!",
+	"boss": "큰 먹도깨비: 퍼져 오는 먹 물결은 피할 곳이 없어요. 저스트로 뚫고 지나가요",
+}
+
+var rings: Array[Dictionary] = []
+var boss: Yokai
+var seen := {}
+var intro_t := 0.0
+var intro_label: Label
+var boss_bar_bg: ColorRect
+var boss_bar: ColorRect
+var boss_name: Label
 
 var mode := Mode.FIGHT
 var paused := false
@@ -61,6 +84,17 @@ var spawn_t := 0.0
 var kills := 0
 var best_cut := 0
 var best_score := 0
+
+# 붓 기술
+var skills := {} # id → 레벨
+var strokes_left := 1
+var trails: Array[Dictionary] = [] # 번짐: 획 자리에 남은 먹물
+var ghost_cuts: Array[Dictionary] = [] # 잔영: 잠시 뒤 다시 긋는 획
+var cards: Array[String] = []
+var chosen_wave := 0
+var recent_pops: Array = [] # 최근 뜬 글씨 (겹치지 않게)
+var card_box: CenterContainer
+var skill_row: HBoxContainer
 
 # UI
 var hp_draw: Control
@@ -141,6 +175,14 @@ func _process(delta: float) -> void:
 
 	var wdt := delta # 세상 시간
 	match mode:
+		Mode.CHOOSE:
+			# 붓 기술 고르는 중: 세상은 멈춘다
+			for i in cards.size():
+				if Input.is_action_just_pressed("pick_%d" % (i + 1)):
+					_pick_card(i)
+					break
+			_update_visuals(delta)
+			return
 		Mode.FIGHT:
 			_fight_input(delta)
 		Mode.JUST:
@@ -159,6 +201,9 @@ func _process(delta: float) -> void:
 
 	_step_enemies(wdt)
 	_step_bullets(wdt)
+	_step_rings(wdt)
+	_step_skill_fx(wdt)
+	intro_t = maxf(0.0, intro_t - delta)
 	if mode == Mode.FIGHT:
 		_check_hits()
 		_step_waves(delta)
@@ -180,7 +225,7 @@ func _fight_input(delta: float) -> void:
 	var aim := _aim()
 	if Input.is_action_just_pressed("dodge") and hero.dash_cd <= 0.0 and not hero.is_dashing():
 		var dir := move if move != Vector2.ZERO else -aim
-		if _threat_ttc() < JUST_WINDOW:
+		if _threat_ttc() < _just_window():
 			_on_just(dir)
 			return
 		hero.start_dash(dir)
@@ -209,7 +254,13 @@ func _attack(aim: Vector2) -> void:
 	var center := hero.position + Vector2(0, -22)
 	fx.slash_arc(center, reach * 0.78, a - half * sdir, a + half * sdir, 17.0 if heavy else 11.0)
 	sfx.play("swing", randf_range(0.9, 1.1) * (0.8 if heavy else 1.0), -3.0)
+	if heavy and skill_lv("chain") > 0:
+		# 연환: 셋째 베기가 먹 칼날을 쏜다 (뚫고 지나감)
+		var lv := skill_lv("chain")
+		bullets.append({"p": center, "dir": aim, "age": 0.0, "friendly": true, "blade": true,
+				"r": 26.0 + 10.0 * lv, "dmg": lv, "hit": {}, "life": 0.45})
 	var hit_any := false
+	var blocked := false
 	for e in enemies:
 		if not e.is_solid():
 			continue
@@ -217,12 +268,30 @@ func _attack(aim: Vector2) -> void:
 		var d := body - center
 		if d.length() > reach + e.radius or absf(angle_difference(a, d.angle())) > half + 0.3:
 			continue
-		hit_any = true
-		var killed := e.hurt(2 if heavy else 1, d, 420.0 if heavy else 180.0)
-		fx.splash(body, d, 18 if heavy else 9, 430.0 if heavy else 300.0, 0.7)
-		_gain(12.0 if heavy else 7.0, 10.0 if heavy else 6.0, 10)
-		if killed:
-			_kill(e, d.orthogonal().normalized())
+		var res := e.take_hit(2 if heavy else 1, d, 420.0 if heavy else 180.0, heavy)
+		match res:
+			"blocked":
+				# 방패에 막힘: 튕겨 나온다
+				blocked = true
+				hero.position -= aim * 18.0
+				fx.splash(body - d.normalized() * e.radius, -d, 6, 260.0, 0.6, Ink.SEAL)
+			"guard_break":
+				hit_any = true
+				sfx.play("break", 1.0, 0.0)
+				fx.splash(body, d, 16, 420.0, 1.0)
+				_pop("방패 깨짐!", e.position + Vector2(0, -80), 30, Ink.SEAL)
+				_gain(10.0, 12.0, 30)
+			_:
+				hit_any = true
+				fx.splash(body, d, 18 if heavy else 9, 430.0 if heavy else 300.0, 0.7)
+				_gain(12.0 if heavy else 7.0, 10.0 if heavy else 6.0, 10)
+				if res == "kill":
+					_kill(e, d.orthogonal().normalized(), false)
+	if blocked and not hit_any:
+		hitstop = maxf(hitstop, 0.04)
+		shake = maxf(shake, 2.5)
+		sfx.play("block", randf_range(0.95, 1.05), -2.0)
+		_pop("막힘", hero.position + Vector2(0, -70), 22, Color(Ink.INK, 0.7))
 	if hit_any:
 		hitstop = maxf(hitstop, 0.09 if heavy else 0.05)
 		shake = maxf(shake, 8.0 if heavy else 3.5)
@@ -230,12 +299,17 @@ func _attack(aim: Vector2) -> void:
 
 
 func _gain(ink_add: float, style_add: float, pts: int) -> void:
-	ink = minf(100.0, ink + ink_add)
+	ink = minf(100.0, ink + ink_add * (1.0 + 0.5 * skill_lv("inkwell")))
 	style = minf(220.0, style + style_add)
 	score += int(pts * RANK_MULT[rank])
 
 
-func _kill(e: Yokai, cut_dir: Vector2) -> void:
+func _kill(e: Yokai, cut_dir: Vector2, by_cut: bool) -> void:
+	# 분열 요괴는 일반 공격으로 쓰러지면 작은 요괴 둘로 갈라진다 (한 획이면 깔끔)
+	if e.kind == "splitter" and not by_cut:
+		for s in [-1.0, 1.0]:
+			_spawn_at("imp", e.position + cut_dir.normalized() * 26.0 * s, true)
+		sfx.play("pop", 1.0, -2.0)
 	e.dying = true
 	e.split = true
 	e.split_dir = cut_dir.normalized() if cut_dir != Vector2.ZERO else Vector2.RIGHT
@@ -266,10 +340,17 @@ func _threat_ttc() -> float:
 			continue
 		var gap := maxf(0.0, along - Hero.RADIUS - e.radius)
 		if e.is_dash_attacking():
-			best = minf(best, gap / 950.0)
-		elif e.is_telegraphing() and e.kind == "charger":
-			best = minf(best, (0.58 - e.t) + gap / 950.0)
+			best = minf(best, gap / e.dash_speed())
+		elif e.is_telegraphing() and e.attack == "dash":
+			best = minf(best, (e.tele_time() - e.t) + gap / e.dash_speed())
+	# 퍼져 오는 먹 물결
+	for rg in rings:
+		var d: float = (hp - rg["c"]).length()
+		if d > rg["r"]:
+			best = minf(best, maxf(0.0, d - rg["r"] - RING_THICK) / RING_SPEED)
 	for b in bullets:
+		if b.get("friendly", false):
+			continue
 		var rel: Vector2 = hp - b["p"]
 		var dir: Vector2 = b["dir"]
 		var along := rel.dot(dir)
@@ -290,12 +371,25 @@ func _on_just(dir: Vector2) -> void:
 	sfx.play("just", 1.0, 0.0)
 	_gain(25.0, 25.0, 50)
 	_pop("저스트!", hero.position + Vector2(0, -90), 46, Ink.SEAL)
+	strokes_left = 1 + skill_lv("double")
+	if skill_lv("reflect") > 0:
+		# 되받아치기: 주변 먹 탄이 방향을 틀어 요괴를 향한다
+		var n := 0
+		for b in bullets:
+			if b.get("friendly", false) or (b["p"] as Vector2).distance_to(hero.position) > 320.0:
+				continue
+			var target := _nearest_enemy(b["p"])
+			b["dir"] = ((target.position + Vector2(0, -target.radius)) - b["p"]).normalized() if target else -(b["dir"] as Vector2)
+			b["friendly"] = true
+			n += 1
+		if n > 0:
+			_pop("되받아치기!", hero.position + Vector2(0, -130), 26, Ink.SEAL)
 
 
-func _enter_stroke() -> void:
+func _enter_stroke(again := false) -> void:
 	mode = Mode.STROKE
-	stroke_t = STROKE_TIME
-	stroke_max = STROKE_BASE + ink * STROKE_PER_INK
+	stroke_t = _stroke_time() * (0.65 if again else 1.0)
+	stroke_max = _stroke_max()
 	stroke_pts = PackedVector2Array([hero.position])
 	drawing = false
 
@@ -328,20 +422,59 @@ func _stroke_input(delta: float) -> void:
 			_pop("...", hero.position + Vector2(0, -80), 30, Ink.INK)
 
 
+## 획이 방패 정면에 걸리면 그 앞에서 끊긴다. {"pts": 끊긴 획, "blocker": 막은 요괴 또는 null}
+func _shield_cut(pts: PackedVector2Array) -> Dictionary:
+	for i in pts.size() - 1:
+		var a := pts[i]
+		var b := pts[i + 1]
+		var seg := b - a
+		var seg_len := seg.length()
+		if seg_len < 0.01:
+			continue
+		var dir := seg / seg_len
+		var best := INF
+		var blocker: Yokai = null
+		for e in enemies:
+			if not e.is_solid() or not e.has_shield or not e.is_front(dir):
+				continue
+			var c := e.position + Vector2(0, -e.radius * 0.5)
+			var q := Geometry2D.get_closest_point_to_segment(c, a, b)
+			if q.distance_to(c) < e.radius + _cut_radius() * 0.7:
+				var along := (q - a).dot(dir)
+				if along < best:
+					best = along
+					blocker = e
+		if blocker:
+			var out := pts.slice(0, i + 1)
+			# 방패 바로 앞에서 멈춘다
+			out.append(a + dir * maxf(0.0, best - blocker.radius - 6.0))
+			return {"pts": out, "blocker": blocker}
+	return {"pts": pts, "blocker": null}
+
+
 func _execute_cut() -> void:
 	mode = Mode.CUT
 	cut_t = 0.0
-	cut_path = stroke_pts
+	var res := _shield_cut(stroke_pts)
+	cut_path = res["pts"]
+	cut_blocker = res["blocker"]
+	if cut_path.size() < 2:
+		cut_path = PackedVector2Array([hero.position, hero.position + Vector2(0.1, 0)])
 	cut_len = Ink.polyline_length(cut_path)
 	ink = maxf(0.0, ink - maxf(0.0, cut_len - STROKE_BASE) / STROKE_PER_INK)
-	cut_targets.clear()
+	cut_targets = _targets_on(cut_path)
+	sfx.play("cut", 1.0, 0.0)
+
+
+func _targets_on(path: PackedVector2Array) -> Array[Yokai]:
+	var out: Array[Yokai] = []
 	for e in enemies:
 		if not e.is_solid():
 			continue
-		var d := minf(Ink.dist_to_polyline(e.position, cut_path), Ink.dist_to_polyline(e.position + Vector2(0, -e.radius), cut_path))
-		if d < e.radius + CUT_RADIUS:
-			cut_targets.append(e)
-	sfx.play("cut", 1.0, 0.0)
+		var d := minf(Ink.dist_to_polyline(e.position, path), Ink.dist_to_polyline(e.position + Vector2(0, -e.radius), path))
+		if d < e.radius + _cut_radius():
+			out.append(e)
+	return out
 
 
 func _cut_step(delta: float) -> void:
@@ -357,12 +490,28 @@ func _cut_step(delta: float) -> void:
 	fx.stroke(cut_path, 36.0, 1.6, Ink.INK, true) # 마른 붓 자국이 있는 굵은 획
 	fx.stroke(cut_path, 5.0, 0.12, Color(1, 1, 1, 0.95), false) # 베는 순간의 섬광
 	var n := 0
-	for e in cut_targets:
-		if is_instance_valid(e) and e.is_solid():
-			_kill(e, Ink.polyline_dir_near(e.position, cut_path))
-			n += 1
-	mode = Mode.FIGHT
-	hero.inv = 0.5
+	if cut_blocker and is_instance_valid(cut_blocker) and cut_blocker.is_solid():
+		# 방패에 막혀 획이 끊겼다: 튕겨 나오고, 그 방패만 깨진다
+		var bdir := (cut_blocker.position - hero.position).normalized()
+		cut_blocker.take_hit(1, bdir, 300.0, true)
+		hero.position -= bdir * 36.0
+		hitstop = maxf(hitstop, 0.1)
+		shake = maxf(shake, 8.0)
+		sfx.play("block", 0.8, 0.0)
+		sfx.play("break", 1.0, -2.0)
+		fx.splash(cut_blocker.position + Vector2(0, -cut_blocker.radius), -bdir, 12, 380.0, 0.9, Ink.SEAL)
+		_pop("방패에 막혀 획이 끊겼다!", cut_blocker.position + Vector2(0, -90), 26, Ink.SEAL)
+	n += _cut_targets_along(cut_path, cut_targets, cut_blocker)
+	n += _skill_after_cut(cut_path)
+	if strokes_left > 1:
+		# 겹획: 한 획 더
+		strokes_left -= 1
+		_enter_stroke(true)
+		hero.inv = 99.0
+		_pop("한 획 더!", hero.position + Vector2(0, -130), 28, Ink.SEAL)
+	else:
+		mode = Mode.FIGHT
+		hero.inv = 0.5
 	best_cut = maxi(best_cut, n)
 	if n > 0:
 		hitstop = 0.16 + 0.03 * mini(n, 5)
@@ -375,6 +524,166 @@ func _cut_step(delta: float) -> void:
 		_pop("일격!" if n == 1 else "%d연 베기!" % n, hero.position + Vector2(0, -90), 40 + 6 * mini(n, 4), Ink.INK)
 	else:
 		_pop("헛손질", hero.position + Vector2(0, -80), 28, Color(Ink.INK, 0.7))
+
+
+## 획 위의 요괴를 벤다. 벤 수를 돌려준다
+func _cut_targets_along(path: PackedVector2Array, targets: Array[Yokai], blocker: Yokai) -> int:
+	var n := 0
+	for e in targets:
+		if not is_instance_valid(e) or not e.is_solid() or e == blocker:
+			continue
+		var travel := Ink.polyline_dir_near(e.position, path)
+		if e.kind == "boss":
+			# 보스는 한 획에 죽지 않고 큰 피해만
+			if e.take_hit(BOSS_CUT_DMG, travel, 300.0, true) == "kill":
+				_kill(e, travel, true)
+			fx.splash(e.position + Vector2(0, -e.radius), travel.orthogonal(), 24, 560.0, 2.5)
+			n += 1
+		elif e.is_front(travel):
+			e.take_hit(1, travel, 300.0, true)
+			sfx.play("break", 1.0, 0.0)
+		else:
+			_kill(e, travel, true)
+			n += 1
+	return n
+
+
+# ───────────── 붓 기술 ─────────────
+
+func skill_lv(id: String) -> int:
+	return skills.get(id, 0)
+
+
+func _just_window() -> float:
+	return JUST_WINDOW + 0.04 * skill_lv("slowink")
+
+
+func _stroke_time() -> float:
+	return STROKE_TIME + 0.6 * skill_lv("slowink")
+
+
+func _stroke_max() -> float:
+	return (STROKE_BASE + ink * STROKE_PER_INK) * (1.0 + 0.4 * skill_lv("fine")) * (1.0 - 0.2 * skill_lv("broad"))
+
+
+func _cut_radius() -> float:
+	return CUT_RADIUS * (1.0 + 0.6 * skill_lv("broad")) * (1.0 - 0.25 * skill_lv("fine"))
+
+
+func _nearest_enemy(p: Vector2) -> Yokai:
+	var best: Yokai = null
+	var bd := INF
+	for e in enemies:
+		if e.is_solid() and e.position.distance_to(p) < bd:
+			bd = e.position.distance_to(p)
+			best = e
+	return best
+
+
+## 기술로 생긴 피해 (방패는 무시). 쓰러지면 true
+func _skill_hit(e: Yokai, dmg: int, from: Vector2, clean: bool) -> bool:
+	if not is_instance_valid(e) or not e.is_solid():
+		return false
+	var dir := (e.position - from).normalized()
+	if dir == Vector2.ZERO:
+		dir = Vector2.RIGHT
+	var shield := e.has_shield
+	e.has_shield = false # 기술은 방패를 무시한다
+	var res := e.take_hit(dmg, dir, 260.0, true)
+	e.has_shield = shield
+	fx.splash(e.position + Vector2(0, -e.radius), dir, 8, 320.0, 0.8)
+	if res == "kill":
+		_kill(e, dir.orthogonal(), clean)
+		return true
+	return false
+
+
+## 한 획이 끝난 뒤 붙는 기술: 꺾음, 낙관, 번짐, 잔영
+func _skill_after_cut(path: PackedVector2Array) -> int:
+	var n := 0
+	var lv := skill_lv("angle")
+	if lv > 0:
+		for c in _corners(path):
+			var r := 55.0 + 20.0 * lv
+			fx.splash(c, Vector2.ZERO, 16, 360.0, PI)
+			stains.wash(c, r * 0.6, 0.12)
+			for e in enemies.duplicate():
+				if e.is_solid() and e.position.distance_to(c) < r + e.radius:
+					if _skill_hit(e, (4 if e.kind == "boss" else 1) + (1 if lv >= 3 else 0), c, true):
+						n += 1
+			_pop("꺾!", c + Vector2(0, -30), 24, Ink.INK)
+	lv = skill_lv("seal")
+	if lv > 0:
+		var end := path[path.size() - 1]
+		var r := 90.0 + 30.0 * lv
+		fx.seal(end, r)
+		shake = maxf(shake, 10.0)
+		sfx.play("slam", 1.4, -3.0)
+		for e in enemies.duplicate():
+			if e.is_solid() and e.position.distance_to(end) < r + e.radius:
+				if _skill_hit(e, (5 if lv >= 3 else 3) if e.kind == "boss" else 2, end, true):
+					n += 1
+	lv = skill_lv("bleed")
+	if lv > 0:
+		trails.append({"pts": path, "t": 2.0 + 2.0 * lv, "max": 2.0 + 2.0 * lv, "dmg": 2 if lv >= 3 else 1})
+	if skill_lv("ghost") > 0:
+		ghost_cuts.append({"pts": path, "t": 0.6})
+	return n
+
+
+## 획에서 크게 꺾인 자리 (30px 간격으로 다시 찍어 손떨림은 무시)
+func _corners(path: PackedVector2Array) -> PackedVector2Array:
+	var pts := PackedVector2Array([path[0]])
+	var acc := 0.0
+	for i in range(1, path.size()):
+		acc += path[i].distance_to(path[i - 1])
+		if acc >= 30.0:
+			pts.append(path[i])
+			acc = 0.0
+	var out := PackedVector2Array()
+	for i in range(1, pts.size() - 1):
+		var a := (pts[i] - pts[i - 1]).normalized()
+		var b := (pts[i + 1] - pts[i]).normalized()
+		if absf(a.angle_to(b)) > 0.9 and (out.is_empty() or out[out.size() - 1].distance_to(pts[i]) > 60.0):
+			out.append(pts[i])
+	return out
+
+
+## 번짐(먹물 자국)과 잔영(먹 그림자 획)
+func _step_skill_fx(wdt: float) -> void:
+	var keep: Array[Dictionary] = []
+	for tr in trails:
+		tr["t"] -= wdt
+		if tr["t"] <= 0.0:
+			continue
+		keep.append(tr)
+		for e in enemies:
+			if not e.is_solid() or Ink.dist_to_polyline(e.position, tr["pts"]) > e.radius + 16.0:
+				continue
+			e.slow_t = 0.3 # 먹물에 발이 묶여 느려진다
+			var cd: float = e.get_meta("bleed_cd", 0.0) - wdt
+			if cd <= 0.0:
+				cd = 0.6
+				_skill_hit(e, tr["dmg"], e.position + Vector2(0, 10), false)
+			e.set_meta("bleed_cd", cd)
+	trails = keep
+	var kg: Array[Dictionary] = []
+	for g in ghost_cuts:
+		g["t"] -= wdt
+		if g["t"] > 0.0:
+			kg.append(g)
+			continue
+		# 먹 그림자가 같은 획을 다시 긋는다
+		var path: PackedVector2Array = g["pts"]
+		var res := _shield_cut(path)
+		fx.stroke(res["pts"], 26.0, 1.0, Color(0.25, 0.2, 0.3, 0.85), true)
+		sfx.play("cut", 1.25, -4.0)
+		var n := _cut_targets_along(res["pts"], _targets_on(res["pts"]), res["blocker"])
+		if n > 0:
+			hitstop = maxf(hitstop, 0.1)
+			shake = maxf(shake, 8.0)
+			_pop("잔영 %d연!" % n, (path[path.size() - 1]) + Vector2(0, -60), 28, Color(0.25, 0.2, 0.3))
+	ghost_cuts = kg
 
 
 func _point_along(pts: PackedVector2Array, dist: float) -> Vector2:
@@ -421,21 +730,59 @@ func _step_enemies(wdt: float) -> void:
 	hero.z_index = clampi(int(hero.position.y / 8.0), 0, 80)
 
 
-func _on_fire(from: Vector2, dir: Vector2, count: int) -> void:
-	var spread := [0.0] if count == 1 else [-0.28, 0.0, 0.28]
-	for s in spread:
+func _on_fire(from: Vector2, dir: Vector2, count: int, spread: float) -> void:
+	for i in count:
+		var s := (i - (count - 1) * 0.5) * spread
 		bullets.append({"p": from, "dir": dir.rotated(s), "age": 0.0})
-	sfx.play("shoot", randf_range(0.95, 1.05), -4.0)
+	sfx.play("shoot", randf_range(0.95, 1.05) * (0.8 if count > 3 else 1.0), -4.0)
+
+
+## 큰 먹도깨비의 먹 물결: 고리가 퍼져 나간다. 피할 곳이 없으니 저스트로 뚫고 지나가야 한다
+func _on_slam(center: Vector2) -> void:
+	rings.append({"c": center, "r": 40.0, "hit": false})
+	shake = maxf(shake, 10.0)
+	sfx.play("slam", 1.0, 0.0)
+	stains.wash(center, 90.0, 0.12)
+
+
+func _step_rings(wdt: float) -> void:
+	var keep: Array[Dictionary] = []
+	for rg in rings:
+		rg["r"] += RING_SPEED * wdt
+		if rg["r"] < RING_MAX:
+			keep.append(rg)
+	rings = keep
 
 
 func _step_bullets(wdt: float) -> void:
 	var keep: Array[Dictionary] = []
 	for b in bullets:
-		b["p"] += b["dir"] * BULLET_SPEED * wdt
-		b["age"] += wdt
-		if not Ink.ARENA.grow(20.0).has_point(b["p"]):
+		var friendly: bool = b.get("friendly", false)
+		var blade: bool = b.get("blade", false)
+		# 아군 먹 탄·칼날은 멈춘 시간에도 아이 쪽 시간으로 날아간다
+		var dt := get_process_delta_time() if friendly and mode == Mode.FIGHT else wdt
+		b["p"] += b["dir"] * (720.0 if blade else BULLET_SPEED * (1.4 if friendly else 1.0)) * dt
+		b["age"] += dt
+		if not Ink.ARENA.grow(20.0).has_point(b["p"]) or (blade and b["age"] > b["life"]):
 			stains.add(b["p"], 8.0, Ink.INK)
 			continue
+		if friendly:
+			# 요괴를 친다 (칼날은 뚫고 지나가며 한 번씩, 되받아친 먹 탄은 맞으면 사라짐)
+			var r: float = b.get("r", BULLET_R)
+			var gone := false
+			for e in enemies.duplicate():
+				if not e.is_solid() or b.has("hit") and b["hit"].has(e.get_instance_id()):
+					continue
+				if (e.position + Vector2(0, -e.radius)).distance_to(b["p"]) < e.radius + r:
+					_skill_hit(e, int(b.get("dmg", 2)), b["p"] - b["dir"] * 20.0, false)
+					sfx.play("hit", 1.2, -4.0)
+					if blade:
+						b["hit"][e.get_instance_id()] = true
+					else:
+						gone = true
+						break
+			if gone:
+				continue
 		keep.append(b)
 	bullets = keep
 
@@ -453,9 +800,15 @@ func _check_hits() -> void:
 				return
 			# 그냥 부딪히면 밀어내기만
 			hero.position += d.normalized() * (Hero.RADIUS + e.radius - d.length())
+	for rg in rings:
+		var rel: Vector2 = hp - rg["c"]
+		if not rg["hit"] and absf(rel.length() - float(rg["r"])) < RING_THICK + Hero.RADIUS * 0.5 and not hero.is_invulnerable():
+			rg["hit"] = true
+			_hurt(rel.normalized())
+			return
 	var keep: Array[Dictionary] = []
 	for b in bullets:
-		if (b["p"] as Vector2).distance_to(hp) < Hero.RADIUS + BULLET_R and not hero.is_invulnerable():
+		if not b.get("friendly", false) and (b["p"] as Vector2).distance_to(hp) < Hero.RADIUS + BULLET_R and not hero.is_invulnerable():
 			fx.splash(b["p"], b["dir"], 8, 250.0)
 			_hurt(b["dir"])
 			continue
@@ -489,23 +842,49 @@ func _step_waves(delta: float) -> void:
 			alive += 1
 	if alive == 0 and spawn_queue.is_empty():
 		wave_t -= delta
+		# 막을 마치면 붓 기술을 고른다 (잠깐 숨 돌린 뒤)
+		if wave >= 1 and chosen_wave < wave and wave_t <= 0.8:
+			chosen_wave = wave
+			_open_cards()
+			return
 		if wave_t <= 0.0:
 			wave += 1
 			wave_t = 1.6
-			var chargers := 2 + wave
-			var shooters := mini(wave - 1, 4)
-			for i in chargers:
-				spawn_queue.append("charger")
-			for i in shooters:
-				spawn_queue.insert(randi() % (spawn_queue.size() + 1), "shooter")
+			ink = minf(100.0, ink + 30.0 * skill_lv("inkwell"))
+			spawn_queue = _wave_list(wave)
 			spawn_t = 0.3
 			sfx.play("gong", 1.0, -2.0)
 			_pop("제 %d 막" % wave, Ink.ARENA.get_center() + Vector2(0, -40), 64, Ink.INK)
+			if wave % BOSS_EVERY == 0:
+				_pop("큰 먹도깨비가 나타났다!", Ink.ARENA.get_center() + Vector2(0, 30), 30, Ink.SEAL)
+				sfx.play("roar", 1.0, 0.0)
 	if not spawn_queue.is_empty():
 		spawn_t -= delta
 		if spawn_t <= 0.0:
 			spawn_t = 0.55
 			_spawn(spawn_queue.pop_front())
+
+
+## 막마다 나오는 요괴. 새 종류는 3막(방패), 4막(분열)부터, 5막마다 보스
+func _wave_list(n: int) -> Array[String]:
+	var list: Array[String] = []
+	if n % BOSS_EVERY == 0:
+		list.append("boss")
+		for i in 1 + n / BOSS_EVERY:
+			list.append("charger")
+		return list
+	for i in 2 + n / 2:
+		list.append("charger")
+	for i in mini(n - 1, 3):
+		list.append("shooter")
+	if n >= 3:
+		for i in mini((n - 1) / 2, 3):
+			list.append("shield")
+	if n >= 4:
+		for i in mini((n - 2) / 2, 2):
+			list.append("splitter")
+	list.shuffle()
+	return list
 
 
 func _spawn(kind: String) -> void:
@@ -514,12 +893,28 @@ func _spawn(kind: String) -> void:
 		p = Vector2(randf_range(Ink.ARENA.position.x + 60, Ink.ARENA.end.x - 60), randf_range(Ink.ARENA.position.y + 60, Ink.ARENA.end.y - 40))
 		if p.distance_to(hero.position) > 300.0:
 			break
+	if kind == "boss":
+		p = Vector2(Ink.ARENA.get_center().x, Ink.ARENA.position.y + 120.0)
+	_spawn_at(kind, p, false)
+	stains.wash(p, 26.0 if kind != "boss" else 70.0, 0.1) # 요괴가 나타난 자리의 번진 먹
+
+
+func _spawn_at(kind: String, p: Vector2, instant: bool) -> void:
 	var e := Yokai.new()
 	e.setup(kind, p, wave)
+	if instant:
+		e.state = "move"
 	e.fire.connect(_on_fire)
+	e.slam.connect(_on_slam)
 	add_child(e)
 	enemies.append(e)
-	stains.wash(p, 26.0, 0.1) # 요괴가 나타난 자리의 번진 먹
+	if kind == "boss":
+		boss = e
+	# 처음 보는 요괴는 아래에 짧은 설명
+	if INTRO.has(kind) and not seen.has(kind):
+		seen[kind] = true
+		intro_label.text = INTRO[kind]
+		intro_t = 5.0
 
 
 # ───────────── 등급 / 끝 ─────────────
@@ -576,29 +971,62 @@ func _draw_paper(ci: Node2D) -> void:
 
 
 func _draw_world() -> void:
+	# 먹 물결 (두꺼운 먹 고리 + 안쪽 번짐)
+	for rg in rings:
+		var c: Vector2 = rg["c"]
+		var r: float = rg["r"]
+		var fade := clampf(1.0 - r / RING_MAX, 0.0, 1.0)
+		world_draw.draw_arc(c, r - RING_THICK * 1.6, 0, TAU, 96, Color(Ink.INK, 0.12 * fade), RING_THICK * 2.0, true)
+		world_draw.draw_arc(c, r, 0, TAU, 96, Color(Ink.INK, 0.85 * fade + 0.15), RING_THICK, true)
+	# 번짐: 획 자리에 남은 먹물 (점점 옅어진다)
+	for tr in trails:
+		var a: float = clampf(float(tr["t"]) / float(tr["max"]), 0.0, 1.0)
+		world_draw.draw_polyline(tr["pts"], Color(Ink.INK, 0.22 * a + 0.05), 30.0, true)
+		world_draw.draw_polyline(tr["pts"], Color(Ink.INK, 0.35 * a), 12.0, true)
 	# 먹 탄
 	for b in bullets:
 		var p: Vector2 = b["p"]
 		var dir: Vector2 = b["dir"]
-		world_draw.draw_line(p - dir * 26.0, p, Color(Ink.INK, 0.35), 8.0, true)
-		world_draw.draw_colored_polygon(Ink.blob(p, BULLET_R, float(b["age"]) * 20.0, 0.2, 12), Ink.INK)
-	# 한 획 그리는 중
+		if b.get("blade", false):
+			# 연환의 먹 칼날: 앞으로 휜 반달
+			var r: float = b["r"]
+			var a := dir.angle()
+			Ink.draw_brush(world_draw, Ink.arc_points(p - dir * r * 0.6, r, a - 1.2, a + 1.2, 12), 10.0, Ink.INK)
+			continue
+		var col := Ink.SEAL if b.get("friendly", false) else Ink.INK
+		world_draw.draw_line(p - dir * 26.0, p, Color(col, 0.35), 8.0, true)
+		world_draw.draw_colored_polygon(Ink.blob(p, BULLET_R, float(b["age"]) * 20.0, 0.2, 12), col)
+	# 한 획 그리는 중 (방패에 걸리면 그 뒤는 흐린 회색 + ✕ 표시)
 	if mode == Mode.STROKE:
 		var remain := 1.0 - Ink.polyline_length(stroke_pts) / stroke_max
+		var res := _shield_cut(stroke_pts)
+		var live: PackedVector2Array = res["pts"]
+		var blocker: Yokai = res["blocker"]
 		if stroke_pts.size() > 1:
-			Ink.draw_brush(world_draw, stroke_pts, 18.0, Color(Ink.INK, 0.55), false)
+			if blocker:
+				world_draw.draw_polyline(stroke_pts, Color(Ink.INK, 0.16), 8.0, true) # 끊긴 뒤쪽 (흐리게)
+			if live.size() > 1:
+				world_draw.draw_polyline(live, Color(Ink.INK, 0.6), 16.0, true) # 반투명 조각이 겹쳐 구슬처럼 보이지 않게 한 줄로
+		if blocker:
+			var xp := live[live.size() - 1]
+			world_draw.draw_line(xp + Vector2(-12, -12), xp + Vector2(12, 12), Ink.SEAL, 5.0, true)
+			world_draw.draw_line(xp + Vector2(-12, 12), xp + Vector2(12, -12), Ink.SEAL, 5.0, true)
 		var tip := stroke_pts[stroke_pts.size() - 1]
 		world_draw.draw_arc(tip, 10.0 + 18.0 * remain, 0, TAU, 32, Color(Ink.SEAL, 0.8), 2.5, true)
-		# 선에 걸릴 요괴 표시
+		# 실제로 벨 요괴는 붉은 고리, 획을 막을 방패병은 회색 고리
 		for e in enemies:
-			if e.is_solid() and stroke_pts.size() > 1 and Ink.dist_to_polyline(e.position, stroke_pts) < e.radius + CUT_RADIUS:
+			if not e.is_solid() or live.size() < 2:
+				continue
+			if e == blocker:
+				world_draw.draw_arc(e.position + Vector2(0, -e.radius), e.radius + 10.0, 0, TAU, 24, Color(Ink.INK, 0.45), 3.0, true)
+			elif Ink.dist_to_polyline(e.position, live) < e.radius + _cut_radius():
 				world_draw.draw_arc(e.position + Vector2(0, -e.radius), e.radius + 10.0, 0, TAU, 24, Ink.SEAL, 3.0, true)
 
 
 func _update_visuals(delta: float) -> void:
 	shake = maxf(0.0, shake - delta * 40.0)
 	camera.offset = Vector2(randf_range(-1, 1), randf_range(-1, 1)) * shake
-	var slow_target := 1.0 if mode in [Mode.JUST, Mode.STROKE, Mode.CUT] else 0.0
+	var slow_target := 1.0 if mode in [Mode.JUST, Mode.STROKE, Mode.CUT, Mode.CHOOSE] else 0.0
 	slow_amt = lerpf(slow_amt, slow_target, 1.0 - exp(-14.0 * delta))
 	tint.color = Color.WHITE.lerp(Color(0.78, 0.76, 0.8), slow_amt)
 	dim_rect.color = Color(Ink.INK, 0.16 * slow_amt)
@@ -611,8 +1039,15 @@ func _pop(text: String, pos: Vector2, size: int, col: Color) -> void:
 	var l := Ink.label(size, col, true)
 	l.text = text
 	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	# 같은 자리에 잇달아 뜨는 글씨는 위로 쌓는다
+	var now := Time.get_ticks_msec()
+	for r in recent_pops:
+		if now - int(r["ms"]) < 500 and (r["p"] as Vector2).distance_to(pos) < 160.0:
+			pos.y = minf(pos.y, float(r["y"]) - 4.0 - size * 0.5) # 앞 글씨 위쪽 끝보다 위로
+	recent_pops = recent_pops.filter(func(r): return now - int(r["ms"]) < 500)
 	# 위쪽 점수판과 겹치지 않게
 	pos.y = maxf(pos.y, 130.0 + size * 0.5)
+	recent_pops.append({"ms": now, "p": pos, "y": pos.y - size * 0.5, "h": 0.0})
 	l.size = Vector2(520, size + 20)
 	l.position = pos - l.size * 0.5
 	l.pivot_offset = l.size * 0.5
@@ -730,6 +1165,34 @@ func _build_ui() -> void:
 	stroke_bar.size = Vector2(320, 8)
 	stroke_bar_bg.add_child(stroke_bar)
 
+	intro_label = Ink.label(19, Ink.INK, false)
+	intro_label.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
+	intro_label.offset_top = -62
+	intro_label.offset_bottom = -36
+	intro_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	root.add_child(intro_label)
+
+	boss_name = Ink.label(22, Ink.SEAL, true)
+	boss_name.text = "큰 먹도깨비"
+	boss_name.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	boss_name.offset_top = 76
+	boss_name.offset_bottom = 104
+	boss_name.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	root.add_child(boss_name)
+	boss_bar_bg = ColorRect.new()
+	boss_bar_bg.color = Color(Ink.INK, 0.15)
+	boss_bar_bg.anchor_left = 0.5
+	boss_bar_bg.anchor_right = 0.5
+	boss_bar_bg.offset_left = -220
+	boss_bar_bg.offset_right = 220
+	boss_bar_bg.offset_top = 104
+	boss_bar_bg.offset_bottom = 114
+	root.add_child(boss_bar_bg)
+	boss_bar = ColorRect.new()
+	boss_bar.color = Ink.SEAL
+	boss_bar.size = Vector2(440, 10)
+	boss_bar_bg.add_child(boss_bar)
+
 	help_label = Ink.label(15, Color(Ink.INK, 0.7), false)
 	help_label.text = "이동 WASD   베기 클릭   회피 Space·우클릭   공격이 닿기 직전에 피하면 시간이 멈춰요   다시 R"
 	help_label.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
@@ -737,6 +1200,17 @@ func _build_ui() -> void:
 	help_label.offset_bottom = -8
 	help_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	root.add_child(help_label)
+
+	skill_row = HBoxContainer.new()
+	skill_row.add_theme_constant_override("separation", 6)
+	skill_row.position = Vector2(26, 84)
+	skill_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(skill_row)
+
+	card_box = CenterContainer.new()
+	card_box.set_anchors_preset(Control.PRESET_FULL_RECT)
+	card_box.visible = false
+	root.add_child(card_box)
 
 	overlay = CenterContainer.new()
 	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -752,6 +1226,19 @@ func _update_hud() -> void:
 	score_label.text = "%d점   ·   최고 한 획 %d연" % [score, best_cut]
 	rank_box.visible = rank > 0
 	rank_label.text = RANK_NAME[rank]
+	var boss_alive := boss != null and is_instance_valid(boss) and not boss.dying
+	boss_name.visible = boss_alive
+	boss_bar_bg.visible = boss_alive
+	if boss_alive:
+		boss_bar.size.x = 440.0 * clampf(float(boss.hp) / boss.max_hp, 0.0, 1.0)
+		if boss.is_angry() and not boss_angry_said:
+			boss_angry_said = true
+			sfx.play("roar", 1.15, 0.0)
+			shake = maxf(shake, 10.0)
+			_pop("먹도깨비가 성났다!", boss.position + Vector2(0, -130), 34, Ink.SEAL)
+			boss_name.text = "큰 먹도깨비 (성남)"
+	intro_label.visible = intro_t > 0.0 and mode == Mode.FIGHT
+	intro_label.modulate.a = clampf(intro_t, 0.0, 1.0)
 	var stroking := mode == Mode.STROKE
 	stroke_label.visible = stroking
 	stroke_bar_bg.visible = stroking
@@ -783,6 +1270,138 @@ func _panel(lines: Array) -> void:
 	overlay.visible = true
 
 
+## 붓 기술 카드 3장
+func _open_cards() -> void:
+	cards = Skills.draw_cards(skills, hero.hp, 5)
+	if cards.is_empty():
+		return
+	mode = Mode.CHOOSE
+	sfx.play("rank", 0.8, -4.0)
+	for c in card_box.get_children():
+		c.queue_free()
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 18)
+	card_box.add_child(vb)
+	var title := Ink.label(40, Ink.INK, true)
+	title.text = "제 %d 막을 마쳤다 · 붓 기술을 하나 고르세요" % wave
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(title)
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 22)
+	vb.add_child(row)
+	for i in cards.size():
+		row.add_child(_card(i, cards[i]))
+	var hint := Ink.label(16, Color(Ink.INK, 0.6), false)
+	hint.text = "클릭하거나 1 · 2 · 3 키"
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(hint)
+	card_box.visible = true
+
+
+func _card(i: int, id: String) -> Button:
+	var info: Dictionary = Skills.ALL[id]
+	var lv := skill_lv(id)
+	var b := Button.new()
+	b.custom_minimum_size = Vector2(250, 300)
+	b.mouse_filter = Control.MOUSE_FILTER_STOP
+	var normal := StyleBoxFlat.new()
+	normal.bg_color = Color(Ink.PAPER, 0.97)
+	normal.border_color = Ink.INK
+	normal.set_border_width_all(3)
+	normal.set_corner_radius_all(6)
+	var hover := normal.duplicate()
+	hover.border_color = Ink.SEAL
+	hover.set_border_width_all(5)
+	b.add_theme_stylebox_override("normal", normal)
+	b.add_theme_stylebox_override("hover", hover)
+	b.add_theme_stylebox_override("pressed", hover)
+	b.add_theme_stylebox_override("focus", hover)
+	b.pressed.connect(_pick_card.bind(i))
+	var vb := VBoxContainer.new()
+	vb.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vb.offset_left = 16
+	vb.offset_right = -16
+	vb.offset_top = 18
+	vb.offset_bottom = -16
+	vb.add_theme_constant_override("separation", 10)
+	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	b.add_child(vb)
+	# 붉은 도장에 새긴 글자
+	var seal := Panel.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Ink.SEAL
+	sb.set_corner_radius_all(4)
+	seal.add_theme_stylebox_override("panel", sb)
+	seal.custom_minimum_size = Vector2(78, 78)
+	seal.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	seal.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vb.add_child(seal)
+	var ch := Ink.label(52, Color("f5efe0"), true, false)
+	ch.text = info["char"]
+	ch.set_anchors_preset(Control.PRESET_FULL_RECT)
+	ch.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	ch.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	seal.add_child(ch)
+	var title_l := Ink.label(30, Ink.INK, true, false)
+	title_l.text = "%d. %s" % [i + 1, info["name"]]
+	title_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(title_l)
+	var lvl := Ink.label(15, Ink.SEAL, false, false)
+	lvl.text = "새 기술" if lv == 0 or id == "heal" else "단계 %d → %d" % [lv, lv + 1]
+	lvl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(lvl)
+	var desc := Ink.label(16, Ink.INK, false, false)
+	desc.text = Skills.desc_for(id, lv + 1)
+	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	desc.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	desc.custom_minimum_size = Vector2(210, 0)
+	vb.add_child(desc)
+	return b
+
+
+func _pick_card(i: int) -> void:
+	if mode != Mode.CHOOSE or i >= cards.size():
+		return
+	var id := cards[i]
+	if id == "heal":
+		hero.hp = mini(5, hero.hp + 2)
+	else:
+		skills[id] = skill_lv(id) + 1
+	sfx.play("just", 1.2, -4.0)
+	card_box.visible = false
+	mode = Mode.FIGHT
+	wave_t = 0.6
+	_refresh_skill_row()
+	_pop(Skills.ALL[id]["name"] + "!", hero.position + Vector2(0, -90), 36, Ink.SEAL)
+
+
+## 왼쪽 아래: 모은 기술 도장
+func _refresh_skill_row() -> void:
+	for c in skill_row.get_children():
+		c.queue_free()
+	for id in skills:
+		var seal := Panel.new()
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Ink.SEAL
+		sb.set_corner_radius_all(3)
+		seal.add_theme_stylebox_override("panel", sb)
+		seal.custom_minimum_size = Vector2(34, 34)
+		seal.tooltip_text = Skills.ALL[id]["name"]
+		skill_row.add_child(seal)
+		var ch := Ink.label(20, Color("f5efe0"), true, false)
+		ch.text = Skills.ALL[id]["char"]
+		ch.set_anchors_preset(Control.PRESET_FULL_RECT)
+		ch.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		ch.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		seal.add_child(ch)
+		if skills[id] > 1:
+			var lv := Ink.label(12, Ink.INK, false, true)
+			lv.text = str(skills[id])
+			lv.position = Vector2(24, 18)
+			seal.add_child(lv)
+
+
 func _show_over(new_best: bool) -> void:
 	_panel([
 		["먹이 다 번졌다", 52, Ink.INK, true],
@@ -805,6 +1424,7 @@ func _setup_input() -> void:
 		"move_left": [KEY_A, KEY_LEFT], "move_right": [KEY_D, KEY_RIGHT],
 		"move_up": [KEY_W, KEY_UP], "move_down": [KEY_S, KEY_DOWN],
 		"dodge": [KEY_SPACE, KEY_SHIFT], "pause": [KEY_ESCAPE], "restart": [KEY_R],
+		"pick_1": [KEY_1, KEY_KP_1], "pick_2": [KEY_2, KEY_KP_2], "pick_3": [KEY_3, KEY_KP_3],
 	}
 	for action in keys:
 		if InputMap.has_action(action):
