@@ -6,7 +6,8 @@ extends Node2D
 ##  2 큰길 빨강: 큰길 차가 줄지어 멈춤(그림자 고정), 골목 차가 세로로 횡단보도를 지나감
 
 const WIDTH := 170.0
-const DURATION: Array[float] = [6.5, 1.6, 7.5]
+const DURATION: Array[float] = [6.5, 1.6, 6.0]
+const PED_BLINK := 2.0 # 초록불이 끝나기 전 깜빡이는 시간
 
 var x0 := 0.0
 var phase := 0
@@ -31,12 +32,24 @@ func setup(x: float, start_phase: int, is_snow: bool) -> void:
 ## 단계가 바뀌면 true
 func step(delta: float) -> bool:
 	t += delta
+	if ped_blinking():
+		signals.queue_redraw()
 	if t >= DURATION[phase]:
 		t = 0.0
 		phase = (phase + 1) % 3
 		signals.queue_redraw()
 		return true
 	return false
+
+
+## 초록불이 곧 끝난다 (보행 신호 깜빡임)
+func ped_blinking() -> bool:
+	return phase == 0 and t > DURATION[0] - PED_BLINK
+
+
+## 횡단보도 구역 (이 안으로는 빨간불에 들어갈 수 없다)
+func walk_zone() -> Vector2:
+	return Vector2(x0 - 4.0, x0 + WIDTH + 4.0)
 
 
 func main_go() -> bool:
@@ -120,6 +133,8 @@ func _draw_signals() -> void:
 	W.rrect(s, pbox, Color("3b3836"), 6)
 	var green := ped_green()
 	var col := Color("5fd17a") if green else Color("ff6a5a")
+	if ped_blinking() and int(t * 4.0) % 2 == 0:
+		col = Color("2f6b3c") # 깜빡: 꺼진 순간
 	var c := pbox.get_center()
 	s.draw_circle(c + Vector2(0, -10), 4, col, true, -1.0, true)
 	if green:

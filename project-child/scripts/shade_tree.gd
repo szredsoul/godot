@@ -8,6 +8,20 @@ var phase := 0.0
 var shade := PackedVector2Array()
 var colors: Array = []
 var bare := false
+var umbrella := false # 횡단보도 그늘막: 신호를 기다리는 동안 안전한 자리
+var umbrella_dx := 0.0
+
+
+## 횡단보도 앞 그늘막 (해 위치와 상관없이 인도를 넉넉히 덮는다)
+func setup_umbrella(x: float, toward_x: float) -> void:
+	umbrella = true
+	position = Vector2(x, W.SIDEWALK_TOP + 14.0)
+	radius = 62.0
+	phase = 0.0
+	z_index = 110
+	colors = [Color("4f9a6a"), Color("f4f8f2")]
+	# 그늘은 횡단보도 쪽으로 넓게 (신호를 기다리는 자리까지 덮는다)
+	umbrella_dx = signf(toward_x - x) * 25.0
 
 
 func setup(x: float, rng: RandomNumberGenerator, season: Dictionary) -> void:
@@ -27,6 +41,19 @@ func setup(x: float, rng: RandomNumberGenerator, season: Dictionary) -> void:
 
 ## 해가 낮을수록(sun.y 큼) 그늘이 인도 깊숙이 드리운다
 func update_shade(sun: Vector2) -> void:
+	if umbrella:
+		# 둥근 네모: 인도 위아래 끝까지, 횡단보도 바로 앞까지 덮는다
+		var r := Rect2(position.x + umbrella_dx - 106.0, W.SIDEWALK_TOP - 2.0, 212.0, W.SIDEWALK_BOTTOM - W.SIDEWALK_TOP + 4.0)
+		var cr := 24.0
+		var pts := PackedVector2Array()
+		var corners := [r.position + Vector2(r.size.x - cr, cr), r.end - Vector2(cr, cr),
+				Vector2(r.position.x + cr, r.end.y - cr), r.position + Vector2(cr, cr)]
+		for k in 4:
+			for s in 7:
+				var a := -PI * 0.5 + k * PI * 0.5 + s * PI / 12.0
+				pts.append(corners[k] + Vector2.from_angle(a) * cr)
+		shade = pts
+		return
 	var size_mul := 0.6 if bare else 1.0
 	var top := W.SIDEWALK_TOP - 4.0
 	var depth := clampf((30.0 + 45.0 * sun.y) * size_mul, 60.0, W.SIDEWALK_BOTTOM - W.SIDEWALK_TOP + 4.0)
@@ -44,6 +71,16 @@ func update_shade(sun: Vector2) -> void:
 
 func _draw() -> void:
 	var c := Vector2(0, -46)
+	if umbrella:
+		# 위에서 본 8각 그늘막 (초록·흰 줄)
+		var uc := Vector2(0, -40)
+		draw_circle(uc + Vector2(5, 7), radius, Color(0.2, 0.15, 0.1, 0.15), true, -1.0, true)
+		for s in 8:
+			var a0 := s * TAU / 8.0 - PI / 8.0
+			var pts := PackedVector2Array([uc, uc + Vector2.from_angle(a0) * radius, uc + Vector2.from_angle(a0 + TAU / 8.0) * radius])
+			draw_colored_polygon(pts, colors[0] if s % 2 == 0 else colors[1])
+		draw_circle(uc, 6, Color("3f7a52"), true, -1.0, true)
+		return
 	if bare:
 		_draw_bare(c)
 		return

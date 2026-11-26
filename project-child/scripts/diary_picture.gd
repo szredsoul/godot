@@ -6,6 +6,8 @@ var hour := 17.0
 var season_key := "spring"
 var late := false
 var cleared := true
+var at_home := true # 마지막 장이면 집과 엄마, 아니면 다음 장소 이정표
+var place := ""
 
 
 func _draw() -> void:
@@ -32,6 +34,20 @@ func _draw() -> void:
 		var cols: Array = season["canopy"]
 		draw_circle(Vector2(tx, ground_y - 70), 34, cols[1], true, -1.0, true)
 		draw_circle(Vector2(tx - 10, ground_y - 80), 18, cols[2], true, -1.0, true)
+	if not at_home:
+		# 다음 장소 이정표 + 친구
+		var sx := w * 0.7
+		draw_rect(Rect2(sx - 3, ground_y - 90, 6, 92), Color("9c7f68"))
+		var board := Rect2(sx - 60, ground_y - 112, 120, 34)
+		draw_rect(board, Color("fffaf0"))
+		draw_rect(board, Color("8a6a4e"), false, 2.0)
+		draw_string(UI.font(true), board.position + Vector2(8, 24), place + " →", HORIZONTAL_ALIGNMENT_LEFT, 104, 16, Color("4a3a32"))
+		var f := Vector2(w * 0.56, ground_y)
+		draw_rect(Rect2(f.x - 8, f.y - 30, 16, 24), Color("f2c14e"))
+		draw_circle(f + Vector2(0, -40), 10, Color("fbd8b4"), true, -1.0, true)
+		draw_arc(f + Vector2(0, -42), 10.5, PI, TAU, 12, Color("6f9fd8"), 6.0, true)
+		_draw_kid_and_deco(w, h, season, ground_y)
+		return
 	# 집
 	var hx := w * 0.62
 	var house := Rect2(hx, ground_y - 80, 110, 84)
@@ -52,6 +68,10 @@ func _draw() -> void:
 		else:
 			draw_arc(m + Vector2(0, -47), 4, 0.2, PI - 0.2, 8, Color("4a3a32"), 1.5, true)
 			draw_line(m + Vector2(9, -36), m + Vector2(20, -56), Color("f6d2b0"), 4.0, true) # 손 흔들기
+	_draw_kid_and_deco(w, h, season, ground_y)
+
+
+func _draw_kid_and_deco(w: float, h: float, season: Dictionary, ground_y: float) -> void:
 	# 아이
 	var c := Vector2(w * 0.45 if cleared else w * 0.38, ground_y)
 	var hat: Color = GameData.HATS[GameData.hat_id()]["color"]

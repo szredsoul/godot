@@ -1,6 +1,6 @@
 extends Node2D
 ## 그림자 밟기 - 게임 진행
-## 하굣길(스테이지): 학교에서 집까지, 하트 3개, 오후 3시 → 6시까지 도착하기.
+## 하굣길(스테이지): 학교에서 집까지 6장. 장마다 시간대가 넘어간다 (오후 3시 → 해질녘 6시 반). 하트 3개.
 ## 도전 모드: 끝없는 길, 한 번 밟으면 끝 (예전 규칙).
 
 enum State { PLAY, CLEAR, FAIL, OVER }
@@ -29,6 +29,9 @@ var season: Dictionary
 var season_key := "spring"
 var length := INF
 var time_limit := 120.0
+var chapter: Dictionary = {}
+var chap_start := 15.0
+var chap_end := 18.0
 
 var sfx: Sfx
 var ground: Ground
@@ -90,6 +93,8 @@ var heat_snd := 0.0
 var bubble_timer := 1.5
 var heat_bg: ColorRect
 var heat_fill: ColorRect
+const UMBRELLA_GAP := 115.0 # 횡단보도에서 그늘막 기둥까지 거리 (신호등을 가리지 않게)
+var wait_hint_cd := 0.0
 const HEAT_UP := 1.3 # 햇빛에서 이 시간(초) 버티면 데임
 const HEAT_DOWN := 1.2
 
@@ -124,14 +129,17 @@ var overlay_panel: PanelContainer
 ## 하단 진행 막대 (학교 → 집)
 class ProgressDraw extends Control:
 	var frac := 0.0
+	var from_text := "학교"
+	var to_text := "집"
 
 	func _draw() -> void:
 		var w := size.x
 		var y := size.y * 0.5
 		draw_line(Vector2(0, y), Vector2(w, y), Color(0.3, 0.2, 0.15, 0.25), 6.0, true)
 		draw_line(Vector2(0, y), Vector2(w * frac, y), UI.C_GOLD, 6.0, true)
-		draw_string(UI.font(true), Vector2(-46, y + 6), "학교", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, UI.C_SUB)
-		draw_string(UI.font(true), Vector2(w + 10, y + 6), "집", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, UI.C_ACCENT)
+		var fw := UI.font(true).get_string_size(from_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 16).x
+		draw_string(UI.font(true), Vector2(-12 - fw, y + 6), from_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, UI.C_SUB)
+		draw_string(UI.font(true), Vector2(w + 12, y + 6), to_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, UI.C_ACCENT)
 		draw_circle(Vector2(w * frac, y), 10, Color("fff7e6"), true, -1.0, true)
 		draw_circle(Vector2(w * frac, y), 7, GameData.HATS[GameData.hat_id()]["color"], true, -1.0, true)
 
@@ -146,14 +154,20 @@ func _ready() -> void:
 		season_key = ["spring", "summer", "autumn", "winter"][rng.randi() % 4]
 		gen.randomize()
 	else:
-		route = GameData.route()
-		season_key = GameData.stage()["season"]
+		chapter = GameData.stage()
+		route = GameData.route().duplicate(true)
+		season_key = GameData.season_key()
+		# 계절(회차)이 지날수록 차가 조금씩 많아진다
+		route["pace"] = float(route["pace"]) * GameData.SEASON_PACE[GameData.season_idx_of(GameData.stage_idx)]
+		chap_start = float(chapter["start"])
+		chap_end = float(chapter["end"])
+		hour = chap_start
 		length = float(route["length"])
-		time_limit = length / Player.WALK * 2.2 # 쉬지 않고 걸으면 4시 반쯤 도착
+		time_limit = length / Player.WALK * 2.2 # 쉬지 않고 걸으면 장 시간의 절반쯤에 도착
 		gen.seed = 1000 + GameData.stage_idx * 10 + GameData.route_idx
-		reverse = GameData.stage().get("rule", "normal") == "reverse"
+		reverse = chapter.get("rule", "normal") == "reverse"
 		if reverse:
-			# 느린 그림자만 타고 가면 늦는다 → 앞 그림자로 옮겨 타야 6시 전에 도착
+			# 느린 그림자만 타고 가면 늦는다 → 앞 그림자로 옮겨 타야 제시간에 도착
 			time_limit = length / Player.WALK * 1.5
 		speed_mul = float(route.get("speed_mul", 1.0))
 	season = GameData.SEASONS[season_key]
@@ -164,8 +178,18 @@ func _ready() -> void:
 
 	ground = Ground.new()
 	ground.season = season
-	ground.home_x = length
 	ground.z_index = -20
+	if not endless:
+		var ci := GameData.chapter_idx_of(GameData.stage_idx)
+		ground.district = chapter["district"]
+		ground.show_school = ci == 0
+		if ci > 0:
+			ground.start_title = chapter["title"]
+		if GameData.is_last_chapter(GameData.stage_idx):
+			ground.home_x = length
+		else:
+			ground.next_x = length
+			ground.next_title = GameData.CHAPTERS[ci + 1]["title"]
 	add_child(ground)
 
 	if season["snow"]:
@@ -241,11 +265,12 @@ func _ready() -> void:
 	if season["ambient"] == "cicada":
 		sfx.play_loop("cicada", -20.0)
 	sfx.play("start", 1.0, -3.0)
-	if reverse:
-		_popup("오늘은 거꾸로! 햇빛이 용암이야", player.position + Vector2(0, -140), UI.C_ACCENT, 30)
-		_popup("그늘로만 다녀서 6시까지 집에!", player.position + Vector2(0, -100), UI.C_TEXT, 22)
-	elif not endless:
-		_popup("6시까지 집에 가자!", player.position + Vector2(0, -110), UI.C_ACCENT, 28)
+	if not endless:
+		_popup("%d장 · %s" % [chapter["ch"], chapter["title"]], player.position + Vector2(0, -170), UI.C_ACCENT, 34)
+		_popup(chapter["intro"], player.position + Vector2(0, -130), UI.C_TEXT, 22)
+		if reverse:
+			_popup("햇빛이 용암이야! 그늘로만 다녀!", player.position + Vector2(0, -95), UI.C_ACCENT, 24)
+		_popup(_goal_text(), player.position + Vector2(0, -60), UI.C_TEXT, 20)
 
 
 func _process(delta: float) -> void:
@@ -303,14 +328,33 @@ func _step_player(delta: float) -> void:
 	else:
 		dir = Input.get_vector("move_left", "move_right", "move_up", "move_down")
 		jump = Input.is_action_just_pressed("jump")
+	var prev_x := player.position.x
 	player.step(delta, dir, jump, Input.is_action_pressed("jump"), Input.is_action_pressed("run"))
 	_resolve_obstacles(player)
+	_block_red_crossing(prev_x, delta)
 	# 무적 시간엔 깜빡임
 	player.visible = invuln <= 0.0 or int(invuln * 12.0) % 2 == 0
 	if player.stepped:
 		sfx.play("step", rng.randf_range(0.85, 1.15), -10.0 if not player.running else -7.0)
 		if footprints:
 			footprints.add(player.position, 1.0 if int(player.walk_t / PI) % 2 == 0 else -1.0)
+
+
+## 보행 신호가 빨간불이면 횡단보도에 들어갈 수 없다 (이미 건너는 중이면 마저 건넌다)
+func _block_red_crossing(prev_x: float, delta: float) -> void:
+	wait_hint_cd = maxf(0.0, wait_hint_cd - delta)
+	for cr in crossings:
+		if cr.ped_green():
+			continue
+		var zone := cr.walk_zone()
+		var was_in := prev_x > zone.x and prev_x < zone.y
+		var now_in := player.position.x > zone.x and player.position.x < zone.y
+		if now_in and not was_in:
+			player.position.x = zone.x if prev_x <= zone.x else zone.y
+			player.vel.x = 0.0
+			if wait_hint_cd <= 0.0:
+				wait_hint_cd = 3.0
+				_popup("빨간불! 그늘막에서 기다리자", player.position + Vector2(0, -100), UI.C_ACCENT, 22)
 
 
 func _resolve_obstacles(p: Player) -> void:
@@ -332,20 +376,52 @@ func _update_sun() -> void:
 		t = clampf(day_time / DAY_LEN, 0.0, 0.97)
 		hour = 7.0 + t * 12.0
 	else:
-		hour = 15.0 + 3.0 * elapsed / time_limit
+		# 장마다 정해진 시간대 안에서 흐른다 (늦으면 그 뒤로도 계속 흐름)
+		hour = chap_start + (chap_end - chap_start) * elapsed / time_limit
 		t = clampf((hour - 7.0) / 12.0, 0.0, 0.97)
 	var el := sin(PI * t) # 0: 해가 낮음, 1: 정오
 	var len_y := lerpf(5.0, 2.4, el)
 	if not endless:
-		# 하굣길: 3시에도 승용차 그림자가 인도를 거의 다 덮고, 6시로 갈수록 더 길어진다
+		# 하굣길: 3시에도 승용차 그림자가 인도를 거의 다 덮고, 해질녘으로 갈수록 더 길어진다
 		# (실제 해 높이대로면 3시엔 인도 아래쪽이 늘 안전해서 피하기만 하면 됨)
-		len_y = lerpf(3.6, 5.2, clampf((hour - 15.0) / 3.0, 0.0, 1.0))
+		# 해질녘에도 x4.6까지만: 더 길면 먼 차선 그림자까지 인도를 다 덮어서 위협이 두 배가 된다
+		len_y = lerpf(3.6, 4.6, clampf((hour - 15.0) / 3.5, 0.0, 1.0))
 	sun = Vector2(-cos(PI * t) * 0.6, len_y * float(season["shadow_mul"]))
-	var morning := Color(1.0, 0.94, 0.86)
-	var noon := Color(1.0, 1.0, 0.98)
-	var evening := Color(1.0, 0.8, 0.66)
-	var c := (morning if t < 0.5 else evening).lerp(noon, el)
+	var c: Color
+	if endless:
+		var morning := Color(1.0, 0.94, 0.86)
+		var noon := Color(1.0, 1.0, 0.98)
+		var evening := Color(1.0, 0.8, 0.66)
+		c = (morning if t < 0.5 else evening).lerp(noon, el)
+	else:
+		c = _dusk_tint(hour)
 	tint.color = c * Color(season["tint"])
+
+
+## 하굣길 시간대별 빛: 오후의 맑은 빛 → 노을 → 해질녘
+const DUSK_KEYS: Array[float] = [15.0, 16.3, 17.0, 17.5, 18.0, 18.5, 19.0]
+const DUSK_COLORS: Array[Color] = [
+	Color(1.0, 0.99, 0.96), Color(1.0, 0.96, 0.88), Color(1.0, 0.91, 0.78),
+	Color(1.0, 0.85, 0.7), Color(1.0, 0.77, 0.64), Color(0.9, 0.72, 0.72), Color(0.78, 0.68, 0.78),
+]
+
+
+func _dusk_tint(h: float) -> Color:
+	if h <= DUSK_KEYS[0]:
+		return DUSK_COLORS[0]
+	for i in range(1, DUSK_KEYS.size()):
+		if h <= DUSK_KEYS[i]:
+			var k := (h - DUSK_KEYS[i - 1]) / (DUSK_KEYS[i] - DUSK_KEYS[i - 1])
+			return DUSK_COLORS[i - 1].lerp(DUSK_COLORS[i], k)
+	return DUSK_COLORS[DUSK_COLORS.size() - 1]
+
+
+## 이 장의 목표 ("3:40까지 문방구 거리로!")
+func _goal_text() -> String:
+	var ci := GameData.chapter_idx_of(GameData.stage_idx)
+	if GameData.is_last_chapter(GameData.stage_idx):
+		return "%s까지 집에 가자!" % GameData.hour_text(chap_end)
+	return "%s까지 %s!" % [GameData.hour_text(chap_end), GameData.with_ro(GameData.CHAPTERS[ci + 1]["title"])]
 
 
 # ───────────── 교차로 / 차 ─────────────
@@ -467,9 +543,14 @@ func _spawn_main_cars(delta: float) -> void:
 	var pace := float(route["pace"])
 	if endless:
 		pace = lerpf(1.0, 0.45, clampf(elapsed / 180.0, 0.0, 1.0))
+	# 근처 교차로가 빨간불이면 새 차를 들여보내지 않는다 (줄이 끝없이 길어지지 않게)
+	var red_near := _red_light_near()
 	for lane in 2:
 		lane_timer[lane] -= delta
 		if lane_timer[lane] > 0.0:
+			continue
+		if red_near:
+			lane_timer[lane] = 0.3
 			continue
 		var in_convoy := convoy_left[lane] > 0
 		var kind := ("car" if rng.randf() < 0.7 else "van") if in_convoy else _pick_kind()
@@ -483,10 +564,11 @@ func _spawn_main_cars(delta: float) -> void:
 			lane_timer[lane] = 0.2
 
 	# 배달 오토바이 (예고 없이 쌩)
-	if bool(route["moto"]) and (not endless or elapsed > 40.0) and state == State.PLAY:
+	if bool(route["moto"]) and (not endless or elapsed > 40.0) and state == State.PLAY and not red_near:
 		moto_timer -= delta
 		if moto_timer <= 0.0:
-			moto_timer = rng.randf_range(7.0, 13.0)
+			var gap: Array = route.get("moto_gap", [7.0, 13.0])
+			moto_timer = rng.randf_range(float(gap[0]), float(gap[1]))
 			if _spawn_main_car("moto", rng.randi() % 2) != null:
 				sfx.play("moto", rng.randf_range(0.9, 1.1), -8.0)
 
@@ -496,6 +578,13 @@ func _spawn_main_cars(delta: float) -> void:
 		if convoy_timer <= 0.0:
 			convoy_timer = rng.randf_range(30.0, 50.0)
 			_start_convoy()
+
+
+func _red_light_near() -> bool:
+	for cr in crossings:
+		if not cr.main_go() and absf(cr.x0 - camera.position.x) < 1600.0:
+			return true
+	return false
 
 
 func _start_convoy() -> void:
@@ -588,6 +677,12 @@ func _add_crossing(x: float) -> void:
 	crossings.append(cr)
 	ground.crossings.append(x)
 	ground.queue_redraw()
+	# 횡단보도 양쪽 그늘막: 빨간불을 기다리는 동안 멈춘 차 그림자를 피할 자리
+	for ux in [x - UMBRELLA_GAP, x + Crossing.WIDTH + UMBRELLA_GAP]:
+		var u := ShadeTree.new()
+		u.setup_umbrella(ux, x + Crossing.WIDTH * 0.5)
+		add_child(u)
+		trees.append(u)
 
 
 func _add_bus_stop(x: float) -> void:
@@ -685,7 +780,7 @@ func _generate_until(limit: float) -> void:
 		var spot := Rect2(tx - 34.0, W.SIDEWALK_TOP, 68.0, 44.0)
 		var ok := true
 		for cr in crossings:
-			if cr.contains_x(tx, 60.0):
+			if cr.contains_x(tx, UMBRELLA_GAP + 140.0): # 그늘막 자리는 비워 둔다
 				ok = false
 		for o in obstacles:
 			if o.rect.intersects(spot):
@@ -816,10 +911,15 @@ func _update_friend(delta: float) -> void:
 # ───────────── 판정 ─────────────
 
 func _in_tree_shade(p: Vector2) -> bool:
+	return _shade_at(p) != null
+
+
+## 발밑의 나무 그늘·그늘막 (없으면 null)
+func _shade_at(p: Vector2) -> ShadeTree:
 	for t in trees:
-		if absf(t.position.x - p.x) < 200.0 and Geometry2D.is_point_in_polygon(p, t.shade):
-			return true
-	return false
+		if absf(t.position.x - p.x) < 220.0 and Geometry2D.is_point_in_polygon(p, t.shade):
+			return t
+	return null
 
 
 func _check_player() -> void:
@@ -1099,10 +1199,10 @@ func _check_progress() -> void:
 		_start_convoy()
 	if endless:
 		return
-	if not late and hour >= 18.0:
+	if not late and hour >= chap_end:
 		late = true
 		sfx.play("late", 1.0, -2.0)
-		_popup("6시가 넘었다! 서두르자!", player.position + Vector2(0, -110), UI.C_ACCENT, 26)
+		_popup("%s가 지났다! 서두르자!" % GameData.hour_text(chap_end), player.position + Vector2(0, -110), UI.C_ACCENT, 26)
 	if px >= length + 20.0:
 		_end_stage(true)
 
@@ -1169,6 +1269,19 @@ func _diary_text(cleared: bool) -> String:
 			lines.append("낙엽이 바스락바스락 굴러다녔다.")
 		"winter":
 			lines.append("하얀 눈이 소복소복 쌓였다.")
+	match String(chapter.get("district", "")):
+		"school":
+			lines.append("교문을 나서자마자 그림자 놀이 시작!")
+		"shops":
+			lines.append("문방구 앞에서 뽑기 구경을 했다.")
+		"construction":
+			lines.append("공사장 아스팔트가 뜨끈뜨끈했다.")
+		"market":
+			lines.append("시장에서 떡볶이 냄새가 났다.")
+		"park":
+			lines.append("공원 그림자가 길게길게 늘어졌다.")
+		"home":
+			lines.append("해가 져서 하늘이 주황색이 됐다.")
 	if reverse:
 		lines.append("오늘은 거꾸로 놀이! 햇빛이 용암이었다.")
 		if events["hops"] > 0:
@@ -1200,14 +1313,22 @@ func _diary_text(cleared: bool) -> String:
 			lines.append("길에서 구슬을 전부 주웠다!")
 		elif marbles_got > 0:
 			lines.append("구슬을 %d개 주웠다." % marbles_got)
-		if late:
-			lines.append("늦게 들어가서 엄마한테 혼났다...")
+		var at_home := GameData.is_last_chapter(GameData.stage_idx)
+		if at_home:
+			if late:
+				lines.append("늦게 들어가서 엄마한테 혼났다...")
+			else:
+				lines.append("%s에 집에 왔다. 엄마가 칭찬해 주셨다." % _clock_text(hour))
 		else:
-			lines.append("%s에 집에 왔다. 엄마가 칭찬해 주셨다." % _clock_text(hour))
+			var next_title: String = GameData.CHAPTERS[GameData.chapter_idx_of(GameData.stage_idx) + 1]["title"]
+			if late:
+				lines.append("늦어 버렸다! %s 발걸음을 재촉했다." % GameData.with_ro(next_title))
+			else:
+				lines.append("%s에 %s 들어섰다." % [_clock_text(hour), GameData.with_ro(next_title)])
 	else:
-		lines.append("그림자를 너무 많이 밟아서 넘어졌다. 내일은 꼭 집까지 가야지.")
+		lines.append("그림자를 너무 많이 밟아서 넘어졌다. 다시 힘내서 가 보자.")
 	while lines.size() > 6:
-		lines.remove_at(1)
+		lines.remove_at(2)
 	return "\n".join(lines)
 
 
@@ -1242,7 +1363,7 @@ func _show_result(cleared: bool, stars: Array) -> void:
 	var vb := VBoxContainer.new()
 	vb.add_theme_constant_override("separation", 12)
 	var title := UI.label(30, UI.C_ACCENT if cleared else UI.C_SUB, true, false)
-	title.text = "%d일차 · %s · 그림일기" % [st["day"], season["name"]]
+	title.text = "%s 하굣길 · %d장 %s · 그림일기" % [season["name"], st["ch"], st["title"]]
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(title)
 
@@ -1255,6 +1376,9 @@ func _show_result(cleared: bool, stars: Array) -> void:
 	pic.season_key = season_key
 	pic.late = late
 	pic.cleared = cleared
+	pic.at_home = GameData.is_last_chapter(GameData.stage_idx)
+	if not pic.at_home:
+		pic.place = GameData.CHAPTERS[GameData.chapter_idx_of(GameData.stage_idx) + 1]["title"]
 	hb.add_child(pic)
 	var text := UI.label(19, UI.C_TEXT, false, false)
 	text.text = _diary_text(cleared)
@@ -1269,8 +1393,8 @@ func _show_result(cleared: bool, stars: Array) -> void:
 		star_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		vb.add_child(star_label)
 		var why := UI.label(15, UI.C_SUB, false, false)
-		why.text = "6시 전 도착 %s   ·   %s %s   ·   구슬 다 줍기 %s" % [
-			"O" if stars[0] else "X", "한 번도 안 데기" if reverse else "한 번도 안 밟기",
+		why.text = "%s 전 도착 %s   ·   %s %s   ·   구슬 다 줍기 %s" % [
+			GameData.hour_text(chap_end), "O" if stars[0] else "X", "한 번도 안 데기" if reverse else "한 번도 안 밟기",
 			"O" if stars[1] else "X", "O" if stars[2] else "X"]
 		why.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		vb.add_child(why)
@@ -1280,10 +1404,14 @@ func _show_result(cleared: bool, stars: Array) -> void:
 	vb.add_child(sc)
 
 	var items := []
-	if cleared and GameData.stage_idx + 1 < GameData.STAGES.size():
-		items.append(["다음 날로", _go_next_day])
+	if cleared and GameData.stage_idx + 1 < GameData.stage_count():
+		if GameData.is_last_chapter(GameData.stage_idx):
+			var next_season: Dictionary = GameData.SEASONS[GameData.SEASON_ORDER[GameData.season_idx_of(GameData.stage_idx) + 1]]
+			items.append(["%s 하굣길로" % next_season["name"], _go_next_day])
+		else:
+			items.append(["다음 장으로", _go_next_day])
 	items.append(["다시 하기", _restart])
-	items.append(["일기장", _go_menu.bind("diary")])
+	items.append(["하굣길 지도", _go_menu.bind("diary")])
 	vb.add_child(_button_row(items))
 	_show_overlay(vb)
 
@@ -1565,6 +1693,9 @@ func _build_ui() -> void:
 
 	if not endless:
 		progress = ProgressDraw.new()
+		progress.from_text = chapter["title"]
+		var ci := GameData.chapter_idx_of(GameData.stage_idx)
+		progress.to_text = "집" if GameData.is_last_chapter(GameData.stage_idx) else GameData.CHAPTERS[ci + 1]["title"]
 		progress.anchor_left = 0.5
 		progress.anchor_right = 0.5
 		progress.anchor_top = 1.0
@@ -1618,15 +1749,15 @@ func _update_hud(delta: float) -> void:
 		items_label.text = "동전 %d" % coins_got
 		clock_label.text = _clock_text(hour)
 	else:
-		var st := GameData.stage()
-		best_label.text = "%d일차 %s · %s (%s)" % [st["day"], season["name"], st["title"], route["name"]]
+		best_label.text = "%s 하굣길 · %d장 %s (%s)" % [season["name"], chapter["ch"], chapter["title"], route["name"]]
 		var h := ""
 		for i in MAX_HEARTS:
 			h += "♥" if i < hearts else "♡"
 		hearts_label.text = h
 		items_label.text = "구슬 %d/%d    동전 %d" % [marbles_got, marbles_total, coins_got]
-		clock_label.text = "%s  /  6:00까지 집에" % _clock_text(hour)
-		clock_label.add_theme_color_override("font_color", UI.C_ACCENT if hour >= 17.5 else UI.C_TEXT)
+		clock_label.text = "%s  /  %s" % [_clock_text(hour), _goal_text().trim_suffix("!")]
+		var hurry := hour >= chap_end - (chap_end - chap_start) * 0.25
+		clock_label.add_theme_color_override("font_color", UI.C_ACCENT if hurry else UI.C_TEXT)
 		progress.frac = clampf((player.position.x - START_X) / (length - START_X), 0.0, 1.0)
 		progress.queue_redraw()
 	if sun.y > 4.0:
@@ -1660,6 +1791,9 @@ func _update_hud(delta: float) -> void:
 		player.modulate = Color.WHITE
 	else:
 		hide_label.visible = state == State.PLAY and in_shade
+		if in_shade:
+			var st := _shade_at(player.position)
+			hide_label.text = "그늘막 · 안전해요" if st != null and st.umbrella else "나무 그늘 · 안전해요"
 		player.modulate = Color(0.82, 0.86, 0.92) if in_shade and state == State.PLAY else Color.WHITE
 
 	warn_timer -= delta
