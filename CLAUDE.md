@@ -13,7 +13,8 @@
 |---|---|---|
 | `finger-roulette/` | 손가락 룰렛 (모바일, 세로 화면) | |
 | `project-child/` | 그림자 밟기 (PC, 탑다운) | 아래 4장 참고. 핵심 재미가 약해 **보류** (새 기획으로 넘어감) |
-| `ink-slash/` | 먹 한 획 (PC, 탑다운 액션, 시험판) | 기획·수치는 `ink-slash/DESIGN.md`. 저스트 회피 → 시간 정지 → 붓으로 한 획 베기 |
+| `ink-slash/` | 먹 한 획 (PC, 탑다운 액션, 시험판) | 기획·수치는 `ink-slash/DESIGN.md`. **보류** (반복이 질림) |
+| `ink-horde/` | 먹 무리 (PC, 뱀서류, 시험판) | 기획·수치는 `ink-horde/DESIGN.md`. **보류** (비슷한 게임이 너무 많아 차별점이 없음) |
 | `tutorial/` | 튜토리얼 연습용 | |
 | `lemmings/` | Tumble Troop | **별도 git 저장소**. 이 저장소에 절대 `git add` 하지 않는다. 작업할 땐 그 폴더의 `CLAUDE.md`를 따른다 |
 
@@ -58,6 +59,7 @@
   - 보통: 차 그림자 -9 / 상상 세계 -8 / 나무 그늘 자리 덮개 -7 / 나무 그늘 -6
   - 거꾸로: 햇빛 용암 -12 / 그늘 자리 덮개 -11 / 차 그림자 -9 / 나무 그늘 -6
 - 잘라 낸 다각형은 그리기 전에 `W.can_fill()`로 검사한다 (너무 가늘면 "triangulation failed" 오류)
+- **`draw_mesh()`로 그리면 Godot가 그림 범위를 계산할 때 위치(transform)를 반영하지 않는다.** 원점에서 멀어지면 그림 전체가 화면 밖으로 판정돼 사라진다 → `RenderingServer.canvas_item_set_custom_rect()`로 범위를 직접 지정한다 (ink-horde에서 실제로 겪음)
 
 ## 5. Godot / 개발 환경
 - Godot **4.7.2**, GDScript, **GL Compatibility** 렌더러.
